@@ -106,8 +106,9 @@ def make_scan(xMod, zMod, numCycles, energies, deviation, redundancy=1):
 
 
 # deal with IBMQ data output
+# not called, but potentially useful for refrence
 def clean_results(jobResults, number, numCycles, redundancy=1):
-    state = '0'
+    state = ''
     duplicatedResults = list()
     # create the output state to be measured
     for i in range(numCycles):
