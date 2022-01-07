@@ -188,8 +188,7 @@ def identify_peaks(xMod, zMod, numCycles, scanNums, finalShotsPerEnergy):
         # number of energies is typically 11
         secondPassEnergies.append(np.linspace(energy + firstStepSize / 2, energy - firstStepSize / 2, scanNums[1]))
     secondPassEnergies = [item for sublist in secondPassEnergies for item in
-                          sublist]  # collapse the array of second ...
-    # ... scans into a single list of all energies to be run
+                          sublist]  # collapse the array of second scans into a single list of all energies to be run
 
     secondPassCircuits = make_scan(xMod, zMod, numCycles, secondPassEnergies, 7, 1)
     secondRunCounts = list()  # list with total successes from each energy (averaged if there are multiple circuits ...
