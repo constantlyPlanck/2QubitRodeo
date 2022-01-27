@@ -10,6 +10,9 @@ from qiskit import *
 def deNone(value):
     return int(0 if value is None else value)
 
+#Gershgorin’s Theorem; turns out all the rows sum to the same thing and all diagonal elements are 0
+def estimate_eignenvalues(xMod, zMod):
+    return abs(xMod) + abs(zMod)
 
 # generate a set of times pulled from a normal distribution that 1. aren't too big and 2. aren't to close to each other
 def make_good_times(stDev, num, minThreshold, maxThreshold):
