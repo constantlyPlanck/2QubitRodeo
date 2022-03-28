@@ -104,7 +104,7 @@ def run_rodeo_basic(times, numCycles, ETarget, xMod, zMod):
 
     for i, time in enumerate(times):
         rodeo.compose(make_cycle(time, ETarget, xMod, zMod), [0, 1, 2], inplace=True)  # append each cycle
-        rodeo.measure(2, i)  # add a mid-circuit measurement for the cycle
+        rodeo.measure(0, i)  # add a mid-circuit measurement for the cycle
 
     return rodeo
 
