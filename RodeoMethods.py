@@ -256,7 +256,7 @@ def make_model(num, centerGuess, sigma):
     return model
 
 # finds the peaks on the second cycle using a multi-gaussian fit
-def second_peaks_gaussian(energies, counts, guesses, noiseLevel, errorThreshold, highThreshold, sigma):
+def second_peaks_gaussian(energies, counts, guesses, noiseLevel, errorThreshold, highThreshold, sigma, printResults = False):
     # start with a constant noise level
     model = ConstantModel()
     model.set_param_hint('c', value=noiseLevel, vary=False)
@@ -270,11 +270,12 @@ def second_peaks_gaussian(energies, counts, guesses, noiseLevel, errorThreshold,
     result = model.fit(counts, x=energies, method='nelder')
 
     # display the results
-    print(result.fit_report())
-    plt.plot(energies, counts, 'ro', ms=6)
-    plt.plot(energies, result.best_fit, label='best fit')
-    plt.plot(energies, result.init_fit, 'r--', label='fit with initial values')
-    plt.show()
+    if printResults:
+        print(result.fit_report())
+        plt.plot(energies, counts, 'ro', ms=6)
+        plt.plot(energies, result.best_fit, label='best fit')
+        plt.plot(energies, result.init_fit, 'r--', label='fit with initial values')
+        plt.show()
 
     rtn = list()
     for i in range(len(guesses)):
@@ -302,7 +303,7 @@ def noisy_gaussian_fit(energies, frequencies, guess, deviation):
     return [result.params["peak_center"].value, result.params["peak_center"].stderr]
 
 # finds the peaks on the third (final) scan using a multi-gaussian model
-def find_initial_final_peaks(energies, counts, guesses, noiseLevel, sigma):
+def find_initial_final_peaks(energies, counts, guesses, noiseLevel, sigma, printResults = False):
     # very similar to second_peaks_gaussian
     # start with a constant background noise
     model = ConstantModel()
@@ -314,11 +315,12 @@ def find_initial_final_peaks(energies, counts, guesses, noiseLevel, sigma):
     # grab the result and display it
     result = model.fit(counts, x=energies, method='nelder')
 
-    print(result.fit_report())
-    plt.plot(energies, counts, 'ro', ms=6)
-    plt.plot(energies, result.best_fit, label='best fit')
-    plt.plot(energies, result.init_fit, 'r--', label='fit with initial values')
-    plt.show()
+    if printResults:
+        print(result.fit_report())
+        plt.plot(energies, counts, 'ro', ms=6)
+        plt.plot(energies, result.best_fit, label='best fit')
+        plt.plot(energies, result.init_fit, 'r--', label='fit with initial values')
+        plt.show()
 
     rtn = list()
     for i in range(len(guesses)):
@@ -332,7 +334,7 @@ def find_initial_final_peaks(energies, counts, guesses, noiseLevel, sigma):
     return rtn
 
 # find each peak with an individual gaussian fit
-def find_final_final_peaks(energies, counts, guesses, noiseLevel, sigma, radius):
+def find_final_final_peaks(energies, counts, guesses, noiseLevel, sigma, radius, printResults = False):
     nearbyEnergies = list()
     nearbyCounts = list()
 
@@ -354,12 +356,11 @@ def find_final_final_peaks(energies, counts, guesses, noiseLevel, sigma, radius)
     rtn = list()
     # for each set of energies and counts, run a constant + (single) gaussian fit and get the center
     for (guessNum, energyList, freqList) in zip(range(len(guesses)), nearbyEnergies, nearbyCounts):
-        rtn.append(find_single_peak(energyList, freqList, guesses[guessNum][0], noiseLevel, sigma))
+        rtn.append(find_single_peak(energyList, freqList, guesses[guessNum][0], noiseLevel, sigma, printResults = printResults))
 
     return rtn
 
-def find_single_peak(energies, counts, guess, noiseLevel, sigma):
-    print(energies, counts)
+def find_single_peak(energies, counts, guess, noiseLevel, sigma, printResults = False):
     model = ConstantModel()
     model.set_param_hint('c', value=noiseLevel, vary=False)
     model += make_model(0, guess, 1/(2 * sigma))
@@ -367,11 +368,12 @@ def find_single_peak(energies, counts, guess, noiseLevel, sigma):
     # grab the result and display it
     result = model.fit(counts, x=energies, method='nelder')
 
-    print(result.fit_report())
-    plt.plot(energies, counts, 'o', ms=6)
-    plt.plot(energies, result.best_fit,'-', label='best fit')
-    plt.plot(energies, result.init_fit, '--', label='fit with initial values')
-    plt.show()
+    if printResults:
+        print(result.fit_report())
+        plt.plot(energies, counts, 'o', ms=6)
+        plt.plot(energies, result.best_fit,'-', label='best fit')
+        plt.plot(energies, result.init_fit, '--', label='fit with initial values')
+        plt.show()
 
     centerLabel = "peak0_center"
     sigmaLabel = "peak0_sigma"
@@ -400,14 +402,14 @@ def identify_peaks(xMod, zMod, numCycles, scanNums, shotsPerEnergy, maxEigenvalu
         firstPassJob = jobManager.run(transpile(firstPassCircuits, backend=backend), backend=backend, name = "first_pass", shots=1024)
     else:
         firstPassJob = jobManager.retrieve_job_set(jobIDs[0], provider)
+    firstPassJobID = firstPassJob.job_set_id()
     # print the id for later retrieval
-    print("first run job id: " + firstPassJob.job_set_id())
+    print("first run job id: " + firstPassJobID)
     # clean up the results into a more usable format
     firstRunCounts = clean_results(firstPassJob.results(), scanNums[0], numCycles, shotsPerEnergy[0])
     # IBMQ stuff end. Final result is an list with total successes from each energy scan (averaged if there are multiple circuits per energy)
     firstRunPeaks = find_first_peaks(firstRunCounts, firstRunEnergies, noiseCounts * 1.66) # this can be replaced by any peak-finding algorithm for the first scan
     print(firstRunPeaks)
-    print(firstRunCounts)
 
     secondPassEnergies = list()
     for energy in firstRunPeaks:
@@ -416,7 +418,6 @@ def identify_peaks(xMod, zMod, numCycles, scanNums, shotsPerEnergy, maxEigenvalu
         secondPassEnergies.append(np.delete(np.linspace(energy + firstStepSize * scanWidths[0], energy - firstStepSize * scanWidths[0], scanNums[1]), -1))
 
     secondPassEnergies = [item for sublist in secondPassEnergies for item in sublist] # collapse the array of second scans into a single list of all energies to be run
-    print(secondPassEnergies)
     # make the circuits for the second scan
     secondPassCircuits = make_scan(xMod, zMod, numCycles, secondPassEnergies, 7, shotsPerEnergy[1])
 
@@ -427,7 +428,8 @@ def identify_peaks(xMod, zMod, numCycles, scanNums, shotsPerEnergy, maxEigenvalu
     else:
         secondPassJob = jobManager.retrieve_job_set(jobIDs[1], provider)
     # print the id to access the data later
-    print("second run job id: " + secondPassJob.job_set_id())
+    secondPassJobID = secondPassJob.job_set_id()
+    print("second run job id: " + secondPassJobID)
     # take the data for the second scan and put in a usable format
     secondRunCounts = clean_results(secondPassJob.results(), len(secondPassEnergies), numCycles, shotsPerEnergy[1])
     # IBMQ stuff end. Final result is the same as the first scan: a list with total successes from each energy scan (averaged if there are multiple circuits per energy)
@@ -459,7 +461,6 @@ def identify_peaks(xMod, zMod, numCycles, scanNums, shotsPerEnergy, maxEigenvalu
         thirdPassEnergies.append(np.linspace(i[0] + firstStepSize * scanWidths[1], i[0] - firstStepSize * scanWidths[1], scanNums[2])) # same process as ...
         # second scan: append the third scans to a list ...
     thirdPassEnergies = [item for sublist in thirdPassEnergies for item in sublist] # ... then collapse the list of lists
-    print(thirdPassEnergies)
     thirdPassCircuits = make_scan(xMod, zMod, numCycles, thirdPassEnergies, 12, shotsPerEnergy[2])
 
     # IBMQ stuff start
@@ -469,7 +470,8 @@ def identify_peaks(xMod, zMod, numCycles, scanNums, shotsPerEnergy, maxEigenvalu
     else:
         thirdPassJob = jobManager.retrieve_job_set(jobIDs[2], provider)
     # print the id and get usable results
-    print("third run job id: " + thirdPassJob.job_set_id())
+    thirdPassJobID = thirdPassJob.job_set_id()
+    print("third run job id: " + thirdPassJobID)
     thirdRunCounts = clean_results(thirdPassJob.results(), len(thirdPassEnergies), numCycles, shotsPerEnergy[2])
 
     # IBMQ stuff end; result is the same list of successes as usual
@@ -489,14 +491,15 @@ def identify_peaks(xMod, zMod, numCycles, scanNums, shotsPerEnergy, maxEigenvalu
     baselineThirdCounts = list(tempSecondRunDict.values())
     # find the scans using multi-gaussian model
     initialThirdRunPeaks = find_initial_final_peaks(baselineThirdEnergies, baselineThirdCounts, secondRunPeaks, noiseCounts, 12)
-    print(initialThirdRunPeaks)
+    # print(initialThirdRunPeaks)
     # then get (theoretically) better estimates with a single gaussian
     finalThirdRunPeaks = find_final_final_peaks(thirdPassEnergies, thirdRunCounts, initialThirdRunPeaks, noiseCounts, 12, 10)
     print(finalThirdRunPeaks)
 
     # return can be modified to return data as needed
     return {"finalPeaks":finalThirdRunPeaks, "secondPeaks":secondRunPeaks, "thirdDual":[thirdRunCounts, thirdPassEnergies],
-            "secondDual":[secondRunCounts, secondPassEnergies], "firstDual":[firstRunCounts, firstRunEnergies], "initialThirdPeaks":initialThirdRunPeaks}
+            "secondDual":[secondRunCounts, secondPassEnergies], "firstDual":[firstRunCounts, firstRunEnergies], "initialThirdPeaks":initialThirdRunPeaks,
+            "jobIDs": [firstPassJobID, secondPassJobID, thirdPassJobID]}
 
 # plot a scanc
 def plot_scans(data):
