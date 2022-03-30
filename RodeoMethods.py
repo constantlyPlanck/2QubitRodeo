@@ -21,6 +21,10 @@ jobManager = IBMQJobManager()
 def deNone(value):
     return int(0 if not value == value or value is None else value)
 
+def flatten(ndlist):
+    return [item for sublist in ndlist for item in sublist]
+
+
 # returns the index of the element nearest to x
 def closest_index(values, x):
      values = np.asarray(values)
@@ -206,6 +210,16 @@ def clean_results(jobResults, number, numCycles, redundancy = 1):
     averagedResults = np.mean(np.array(duplicatedResults).reshape(-1, redundancy), axis=1)
     return averagedResults
 
+def unflatten(flatResults, numberMerged):
+    singleResultLength = int(len(flatResults) / numberMerged)
+    arrayedResults = list()
+    for i in range(numberMerged):
+        resultSet = []
+        for j in range(singleResultLength):
+            resultSet.append(flatResults[i * singleResultLength + j])
+        arrayedResults.append(resultSet)
+    return arrayedResults
+
 # finds peaks from the first pass given a list of energies and their successes
 def find_first_peaks(firstRunCounts, firstRunEnergies, threshold):
     potentialPeaks = list()
@@ -334,21 +348,18 @@ def find_initial_final_peaks(energies, counts, guesses, noiseLevel, sigma, print
     return rtn
 
 # find each peak with an individual gaussian fit
-def find_final_final_peaks(energies, counts, guesses, noiseLevel, sigma, radius, printResults = False):
+def find_final_final_peaks(energies, counts, guesses, noiseLevel, sigma, scanNum, numEigenvalues, printResults = False):
     nearbyEnergies = list()
     nearbyCounts = list()
 
-    for guess in guesses:
+    for scan in range(numEigenvalues):
         tempEnergies = list()
         tempCounts = list()
         # find the nearest index to the each guess
-        closestIndex = closest_index(energies, guess[0])
-        for i in range(radius):
+        for energyNum in range(scanNum):
             # add all the nearby energies and counts to a list
-            tempEnergies.append(energies[closestIndex - i])
-            tempEnergies.append(energies[closestIndex + i])
-            tempCounts.append(counts[closestIndex + i])
-            tempCounts.append(counts[closestIndex - i])
+            tempEnergies.append(energies[scanNum * scan + energyNum])
+            tempCounts.append(counts[scanNum * scan + energyNum])
         # add the list of nearby energies (and counts) for one peak to lists with this data for all of them
         nearbyEnergies.append(tempEnergies)
         nearbyCounts.append(tempCounts)
@@ -381,21 +392,29 @@ def find_single_peak(energies, counts, guess, noiseLevel, sigma, printResults = 
 
 
 # find peaks for a given set of parameters
-def identify_peaks(xMod, zMod, numCycles, scanNums, shotsPerEnergy, maxEigenvalue = None, scanWidths = None, jobIDs = None, backend = provider.get_backend('ibmq_belem')):
+def identify_peaks(xMod, zMod, numCycles, scanNums, shotsPerEnergy, maxEigenvalue = None, scanWidths = None, jobIDs = None, repetitions = None, backend = provider.get_backend('ibmq_belem')):
 
     # only scan a certain range instead of the entire possible space
     maxEigenvalue = estimate_eignenvalues(xMod, zMod) if maxEigenvalue is None else maxEigenvalue
     # control the widths of the scans as a fraction of the first scan's width
     scanWidths = [0.5, 0.25] if scanWidths is None else scanWidths
+    # allow for efficient repeated scans with the same parameters
+    repetitions = 1 if repetitions is None else repetitions
+
+    noiseCounts = 1024/(2**numCycles)
 
     firstRunEnergies = np.linspace(-maxEigenvalue, maxEigenvalue, scanNums[0]) # create a set of energies to scan first
     firstStepSize = abs(firstRunEnergies[1]) - abs(firstRunEnergies[0]) # used to make second and third scans not ...
     # ... bleed into areas where there is no eigenvalue. Also prevents accidental overlap of scans
 
     # makes a set of circuits to run (checks first scan for ranges where eigenvalues are likely)
-    firstPassCircuits = make_scan(xMod, zMod, numCycles, firstRunEnergies, 3, shotsPerEnergy[0])
+    firstPassCircuits = list()
+    for i in range(repetitions):
+        firstPassCircuits.append(make_scan(xMod, zMod, numCycles, firstRunEnergies, 3, shotsPerEnergy[0]))
 
-    noiseCounts = 1024/(2**numCycles)
+    firstPassCircuits = flatten(firstPassCircuits)
+
+
     # IBMQ stuff start
     # create a job with all the circuits on the first pass if there isn't an id to retrieve from. Jobs with more than 300 circuits are split up
     if jobIDs is None or jobIDs[0] is None:
@@ -406,18 +425,25 @@ def identify_peaks(xMod, zMod, numCycles, scanNums, shotsPerEnergy, maxEigenvalu
     # print the id for later retrieval
     print("first run job id: " + firstPassJobID)
     # clean up the results into a more usable format
-    firstRunCounts = clean_results(firstPassJob.results(), scanNums[0], numCycles, shotsPerEnergy[0])
+    firstRunCounts = clean_results(firstPassJob.results(), scanNums[0] * repetitions, numCycles, shotsPerEnergy[0])
+    firstRunCounts = unflatten(firstRunCounts, repetitions)
+    print(firstRunCounts)
     # IBMQ stuff end. Final result is an list with total successes from each energy scan (averaged if there are multiple circuits per energy)
-    firstRunPeaks = find_first_peaks(firstRunCounts, firstRunEnergies, noiseCounts * 1.66) # this can be replaced by any peak-finding algorithm for the first scan
+    firstRunPeaks = list()
+    for resultSet in firstRunCounts:
+        firstRunPeaks.append(find_first_peaks(resultSet, firstRunEnergies, noiseCounts * 1.66)) # this can be replaced by any peak-finding algorithm for the first scan
     print(firstRunPeaks)
 
     secondPassEnergies = list()
-    for energy in firstRunPeaks:
+    for energySet in firstRunPeaks:
+        singleSecondPass = []
         # go through each peak in the first scan and make a second scan over it. Append this scan to a list
         # number of energies is typically 11
-        secondPassEnergies.append(np.delete(np.linspace(energy + firstStepSize * scanWidths[0], energy - firstStepSize * scanWidths[0], scanNums[1]), -1))
-
-    secondPassEnergies = [item for sublist in secondPassEnergies for item in sublist] # collapse the array of second scans into a single list of all energies to be run
+        for energy in energySet:
+            singleSecondPass.append(np.delete(np.linspace(energy + firstStepSize * scanWidths[0], energy - firstStepSize * scanWidths[0], scanNums[1]), -1))
+        singleSecondPass = flatten(singleSecondPass) # collapse the array of second scans into a single list of all energies to be run
+        secondPassEnergies.append(singleSecondPass)
+    secondPassEnergies = flatten(secondPassEnergies)
     # make the circuits for the second scan
     secondPassCircuits = make_scan(xMod, zMod, numCycles, secondPassEnergies, 7, shotsPerEnergy[1])
 
@@ -432,35 +458,43 @@ def identify_peaks(xMod, zMod, numCycles, scanNums, shotsPerEnergy, maxEigenvalu
     print("second run job id: " + secondPassJobID)
     # take the data for the second scan and put in a usable format
     secondRunCounts = clean_results(secondPassJob.results(), len(secondPassEnergies), numCycles, shotsPerEnergy[1])
+    secondRunCounts = unflatten(secondRunCounts, repetitions)
+    secondPassEnergies = unflatten(secondPassEnergies, repetitions)
+    print(secondPassEnergies)
     # IBMQ stuff end. Final result is the same as the first scan: a list with total successes from each energy scan (averaged if there are multiple circuits per energy)
+    secondRunPeaks = list()
+    for secondCountSet, secondEnergySet, firstPeakSet in zip(secondRunCounts, secondPassEnergies, firstRunPeaks):
+        # makes a dictionary of the second scan counts keyed to their energies
+        secondRunDict = {secondEnergySet[i]: secondCountSet[i] for i in range(len(secondEnergySet))}
+        tempSecondRunDict = dict()
 
-    # make a dictionary of the second scan counts keyed to their energies
-    secondRunDict = {secondPassEnergies[i]: secondRunCounts[i] for i in range(len(secondPassEnergies))}
-    tempSecondRunDict = dict()
+        # fill the space between the scans with noise
+        for i in np.linspace(-maxEigenvalue, maxEigenvalue, scanNums[0]):
+            for j in np.delete(np.linspace(i - firstStepSize * scanWidths[0], i + firstStepSize * scanWidths[0], scanNums[1]), -1):
+                tempSecondRunDict[j] = secondRunDict.get(j, noiseCounts)
 
-    # fill the space between the scans with noise
-    for i in np.linspace(-maxEigenvalue, maxEigenvalue, scanNums[0]):
-        for j in np.delete(np.linspace(i - firstStepSize * scanWidths[0], i + firstStepSize * scanWidths[0], scanNums[1]), -1):
-            tempSecondRunDict[j] = secondRunDict.get(j, noiseCounts)
-
-    # get the energies and counts for the second scan (including the added noise entries)
-    baselineSecondEnergies = list(tempSecondRunDict.keys())
-    baselineSecondCounts = list(tempSecondRunDict.values())
-    # find the peaks of the second scan
-    secondRunPeaks = second_peaks_gaussian(baselineSecondEnergies, baselineSecondCounts, firstRunPeaks, noiseCounts, 0.1, maxEigenvalue * 1.25, 7)
-    # as with the first scan, this can be replaced with whatever peak-finding algorithm is desired
+        # get the energies and counts for the second scan (including the added noise entries)
+        baselineSecondEnergies = list(tempSecondRunDict.keys())
+        baselineSecondCounts = list(tempSecondRunDict.values())
+        # find the peaks of the second scan
+        secondRunPeaks.append(second_peaks_gaussian(baselineSecondEnergies, baselineSecondCounts, firstPeakSet, noiseCounts, 0.1, maxEigenvalue * 1.25, 7))
+        # as with the first scan, this can be replaced with whatever peak-finding algorithm is desired
     print(secondRunPeaks)
 
     thirdPassEnergies = list()
-    for i in secondRunPeaks:
-        # do the same thing with the second scan peaks as was done with the first scan peaks.
-        # there is one energy at the center of each peak from the second scan. The size of firstStepSize/4 is used ...
-        # ... as there is a good bit of variation present from the second scan without redundancy
-        # Basically scanning over just the energy of the second scan's peaks would probably miss some eigenvalues
-        # Number of scans is typically 11 as well
-        thirdPassEnergies.append(np.linspace(i[0] + firstStepSize * scanWidths[1], i[0] - firstStepSize * scanWidths[1], scanNums[2])) # same process as ...
-        # second scan: append the third scans to a list ...
-    thirdPassEnergies = [item for sublist in thirdPassEnergies for item in sublist] # ... then collapse the list of lists
+    for energySet in secondRunPeaks:
+        singleThirdPass = []
+        for i in energySet:
+            # do the same thing with the second scan peaks as was done with the first scan peaks.
+            # there is one energy at the center of each peak from the second scan. The size of firstStepSize/4 is used ...
+            # ... as there is a good bit of variation present from the second scan without redundancy
+            # Basically scanning over just the energy of the second scan's peaks would probably miss some eigenvalues
+            # Number of scans is typically 11 as well
+            singleThirdPass.append(np.linspace(i[0] + firstStepSize * scanWidths[1], i[0] - firstStepSize * scanWidths[1], scanNums[2])) # same process as ...
+            # second scan: append the third scans to a list ...
+        singleThirdPass = flatten(singleThirdPass)
+        thirdPassEnergies.append(singleThirdPass) # ... then collapse the list of lists
+    thirdPassEnergies = flatten(thirdPassEnergies)
     thirdPassCircuits = make_scan(xMod, zMod, numCycles, thirdPassEnergies, 12, shotsPerEnergy[2])
 
     # IBMQ stuff start
@@ -473,27 +507,32 @@ def identify_peaks(xMod, zMod, numCycles, scanNums, shotsPerEnergy, maxEigenvalu
     thirdPassJobID = thirdPassJob.job_set_id()
     print("third run job id: " + thirdPassJobID)
     thirdRunCounts = clean_results(thirdPassJob.results(), len(thirdPassEnergies), numCycles, shotsPerEnergy[2])
-
+    thirdRunCounts = unflatten(thirdRunCounts, repetitions)
+    thirdPassEnergies = unflatten(thirdPassEnergies, repetitions)
     # IBMQ stuff end; result is the same list of successes as usual
 
-
+    initialThirdRunPeaks = list()
+    finalThirdRunPeaks = list()
     # make a dictionary of the second scan counts keyed to their energies
-    thirdRunDict = {thirdPassEnergies[i]: thirdRunCounts[i] for i in range(len(thirdPassEnergies))}
-    tempthirdRunDict = dict()
+    for thirdCountSet, thirdEnergySet, secondPeakSet in zip(thirdRunCounts, thirdPassEnergies, secondRunPeaks):
+        thirdRunDict = {thirdEnergySet[i]: thirdCountSet[i] for i in range(len(thirdEnergySet))}
+        tempthirdRunDict = dict()
 
-    # fill the space between the scans with noise
-    for i in np.linspace(-maxEigenvalue, maxEigenvalue, scanNums[0]):
-        for j in np.delete(np.linspace(i - firstStepSize * scanWidths[0], i + firstStepSize * scanWidths[0], scanNums[1]), -1):
-            tempthirdRunDict[j] = thirdRunDict.get(j, noiseCounts)
+        # fill the space between the scans with noise
+        for i in np.linspace(-maxEigenvalue, maxEigenvalue, scanNums[0]):
+            for j in np.delete(np.linspace(i - firstStepSize * scanWidths[0], i + firstStepSize * scanWidths[0], scanNums[1]), -1):
+                tempthirdRunDict[j] = thirdRunDict.get(j, noiseCounts)
 
-    # get the energies and counts for the second scan (including the added noise entries)
-    baselineThirdEnergies = list(tempSecondRunDict.keys())
-    baselineThirdCounts = list(tempSecondRunDict.values())
-    # find the scans using multi-gaussian model
-    initialThirdRunPeaks = find_initial_final_peaks(baselineThirdEnergies, baselineThirdCounts, secondRunPeaks, noiseCounts, 12)
-    # print(initialThirdRunPeaks)
-    # then get (theoretically) better estimates with a single gaussian
-    finalThirdRunPeaks = find_final_final_peaks(thirdPassEnergies, thirdRunCounts, initialThirdRunPeaks, noiseCounts, 12, 10)
+        # get the energies and counts for the second scan (including the added noise entries)
+        baselineThirdEnergies = list(thirdRunDict.keys())
+        baselineThirdCounts = list(thirdRunDict.values())
+        # find the scans using multi-gaussian model
+        tempInitialThirdRunPeaks = find_initial_final_peaks(baselineThirdEnergies, baselineThirdCounts, secondPeakSet, noiseCounts, 12)
+        initialThirdRunPeaks.append(tempInitialThirdRunPeaks)
+        # print(initialThirdRunPeaks)
+        # then get (theoretically) better estimates with a single gaussian
+        print(len(tempInitialThirdRunPeaks), len(thirdCountSet), len(thirdEnergySet))
+        finalThirdRunPeaks.append(find_final_final_peaks(thirdEnergySet, thirdCountSet, tempInitialThirdRunPeaks, noiseCounts, 12, scanNums[2], 4))
     print(finalThirdRunPeaks)
 
     # return can be modified to return data as needed
