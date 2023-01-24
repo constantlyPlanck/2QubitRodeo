@@ -3,3 +3,6 @@ CircuitTesting.ipynb
 /key2.txt
 /IBMQ Testing.ipynb
 *.pyc
+QuantinuumToken.txt
+QuantinuumAPI.ipynb
+qasm.txt
