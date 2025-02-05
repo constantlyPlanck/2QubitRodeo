@@ -1,20 +1,20 @@
-import lmfit.models
 import numpy as np
-from qiskit.providers.ibmq.managed import IBMQJobManager
 from qiskit import *
 import matplotlib.pyplot as plt
 from lmfit.models import ConstantModel, GaussianModel, SineModel
+from lmfit import Parameters, minimize, report_fit
 import random
 import itertools
 from qiskit import QuantumCircuit
+from qiskit_ibm_provider import IBMProvider
+from qiskit_ibm_provider.job import IBMCircuitJob
+from qiskit.providers.aer import Aer
 
 file = open("key2.txt", "r")  # needs to be replaced with your key
 key = file.read()
-IBMQ.save_account(key, overwrite='True')
-IBMQ.load_account()
-provider = IBMQ.get_provider(hub='ibm-q-research')
-jobManager = IBMQJobManager()
-
+IBMProvider.save_account(token=key, overwrite=True)
+provider = IBMProvider(instance='ibm-q-research/michstate-4/main')
+sim = Aer.get_backend('aer_simulator')
 
 # This file has all the methods necessary to run the two-qubit rodeo algorithm without the IMBQ job stuff. The  ...
 # ... final method, identify_peaks(), is intentionally missing the method to get the counts for each run. This needs ...
@@ -201,48 +201,101 @@ def make_two_state_cycle(time, E0, E1, xMod, zMod):
     return cycle
 
 
-def make_two_state_scan(times, numCycles, E0, E1, xMod, zMod, theta, rotAxis):
+def make_two_state_scan(times, numCycles, E0, E1, xMod, zMod, theta, rotAxis, initialState=None, measureAncilla=None, statevector=None):
     rodeo = QuantumCircuit(QuantumRegister(4), ClassicalRegister(2, "measurements"), ClassicalRegister(1, "ancilla"),
                            ClassicalRegister(numCycles, "cycles"))
+    if initialState is not None:
+        rodeo.initialize(initialState, [2, 3])
+
+    if measureAncilla is not None:
+        measureAncilla = measureAncilla
+    else:
+        measureAncilla = True
+
+    if statevector is not None:
+        statevector = statevector
+    else:
+        statevector = False
+
     rodeo.h(0)
     for i, time in enumerate(times):
         rodeo.compose(make_two_state_cycle(time, E0, E1, xMod, zMod), [0, 1, 2, 3], inplace=True)
         rodeo.measure(1, i + 3)
 
+    # rodeo.h(0)
     if rotAxis == "x":
         rodeo.rx(theta, 0)
     else:
         rodeo.ry(theta, 0)
 
-    rodeo.measure(0, 2)
+    if measureAncilla:
+        rodeo.measure(0, 2)
+
+    if statevector:
+        rodeo.save_statevector(conditional=True)
+
     rodeo.measure(2, 1)
     rodeo.measure(3, 0)
 
     return rodeo
 
 
-def run_cont_two_state(cycles, redundancy, xMod, zMod, E0, E1, maxTheta, numScans, backend=provider.get_backend('ibmq_qasm_simulator'), jobID=None):
+def run_cont_two_state(cycles, redundancy, xMod, zMod, E0, E1, maxTheta, numScans, backend=provider.get_backend('ibmq_qasm_simulator'), jobID=None, printJobID=True, initialState=None, fixedTimes=None):
     xCircs = list()
     yCircs = list()
     angles = np.linspace(0, maxTheta, numScans)
+    if initialState is not None:
+        initialState = initialState
 
     if jobID is None:
         for angle in angles:
             for i in range(redundancy):
-                times = np.random.normal(0, 5, cycles)
+                if fixedTimes is not None:
+                    times = fixedTimes
+                else:
+                    times = np.random.normal(0, 5, cycles)
+
                 # xCircs.append(make_two_state_scan(times, cycles, E0, E1, xMod, zMod, angle, "x"))
-                yCircs.append(make_two_state_scan(times, cycles, E0, E1, xMod, zMod, angle, "y"))
+                yCircs.append(make_two_state_scan(times, cycles, E0, E1, xMod, zMod, angle, "y", initialState=initialState))
         circs = list()
         # circs.append(xCircs)
         circs.append(yCircs)
         circs = flatten(circs)
         circs = transpile(circs, backend=backend)
-        job = jobManager.run(circs, backend=backend, name="two_state", shots=1024)
+        job = backend.run(circs, name="two_state", shots=1024)
     else:
-        job = jobManager.retrieve_job_set(jobID, provider)
-    print("two state job " + job.job_set_id())
+        job = provider.retrieve_job(job_id=jobID)
+    if printJobID:
+        print("two state job " + job.job_id())
 
-    return [job.results(), circs]
+    return [job.result(), circs, jobID]
+
+
+def run_fixed_time_cont_two_state(cycles, xMod, zMod, E0, E1, maxTheta, numScans, times, backend=provider.get_backend('ibmq_qasm_simulator'), jobID=None, printJobID=True, initialState=None):
+    xCircs = list()
+    yCircs = list()
+    angles = np.linspace(0, maxTheta, numScans)
+    if initialState is not None:
+        initialState = initialState
+
+    for angle in angles:
+        # xCircs.append(make_two_state_scan(times, cycles, E0, E1, xMod, zMod, angle, "x"))
+        yCircs.append(make_two_state_scan(times, cycles, E0, E1, xMod, zMod, angle, "y", initialState=initialState))
+    circs = list()
+    # circs.append(xCircs)
+    circs.append(yCircs)
+    circs = flatten(circs)
+
+    # if jobID is None:
+    #     circs = transpile(circs, backend=backend)
+    #     job = backend.run(circs, name="two_state", shots=1024)
+    # else:
+    #     job = provider.retrieve_job(job_id=jobID)
+    # if printJobID:
+    #     print("two state job " + job.job_id())
+
+    # return [job.result(), circs, jobID]
+    return circs
 
 
 def make_two_state_test_cycle(time, E0, E1, xMod, zMod):
@@ -277,10 +330,13 @@ def make_two_state_test_cycle(time, E0, E1, xMod, zMod):
     return cycle
 
 
-def test_cont_two_state(times, numCycles, E0, E1, xMod, zMod, twoStateTime):
+def test_cont_two_state(times, numCycles, E0, E1, xMod, zMod, twoStateTime, initialState=None):
     rodeo = QuantumCircuit(QuantumRegister(8), ClassicalRegister(1, "ancilla"), ClassicalRegister(2, "measurements"), ClassicalRegister(numCycles, "cycles"))
+    if initialState is not None:
+        rodeo.initialize(initialState, [6, 7])
     rodeo.h(0)
     # rodeo.x(0)
+
     for i, time in enumerate(times):
         rodeo.compose(make_two_state_test_cycle(time, E0, E1, xMod, zMod), [0, i+1, 6, 7], inplace=True)
         rodeo.measure(i+1, i + 3)
@@ -298,16 +354,30 @@ def test_cont_two_state(times, numCycles, E0, E1, xMod, zMod, twoStateTime):
     return rodeo
 
 
-def make_cont_two_state_test_circs(cycles, redundancy, xMod, zMod, E0, E1, twoStateTimes):
+def make_cont_two_state_test_circs(cycles, redundancy, xMod, zMod, E0, E1, twoStateTimes, initialState=None):
     circs = list()
+    if initialState is not None:
+        initialState = initialState
 
     for i in range(redundancy):
         times = np.random.normal(0, 5, cycles)
         for secondTime in twoStateTimes:
-            circs.append(test_cont_two_state(times, cycles, E0, E1, xMod, zMod, secondTime))
+            circs.append(test_cont_two_state(times, cycles, E0, E1, xMod, zMod, secondTime, initialState=initialState))
 
     return circs
 
+
+def test_two_state_circs(cycles, redundancy, xMod, zMod, E0, E1, angles, initialState=None):
+    circs = list()
+    if initialState is not None:
+        initialState = initialState
+
+    for i in range(redundancy):
+        times = np.random.normal(0, 5, cycles)
+        for angle in angles:
+            circs.append(make_two_state_scan(times, cycles, E0, E1, xMod, zMod, angle, "y", initialState=initialState))
+
+    return circs
 
 def run_cont_two_state_test(cycles, redundancy, xMod, zMod, E0, E1, twoStateTimes, backend=provider.get_backend('ibmq_qasm_simulator'), jobID=None):
     circs = list()
@@ -318,12 +388,12 @@ def run_cont_two_state_test(cycles, redundancy, xMod, zMod, E0, E1, twoStateTime
             for secondTime in twoStateTimes:
                 circs.append(test_cont_two_state(times, cycles, E0, E1, xMod, zMod, secondTime))
         circs = transpile(circs, backend=backend)
-        job = jobManager.run(circs, backend=backend, name="two_state", shots=1024)
+        job = backend.run(circs, name="two_state", shots=1024)
     else:
-        job = jobManager.retrieve_job_set(jobID, provider)
-    print("two state job " + job.job_set_id())
+        job = provider.retrieve_job(job_id=jobID)
+    print("two state job " + job.job_id())
 
-    return job.results()
+    return job.result()
 
 
 def process_two_state_register(results, numCycles, redundancy, maxTheta, numScans):
@@ -394,7 +464,7 @@ def process_cont_test(results, numCycles, redundancy):
 
 
 # final, working processing method for energy-control two-state rodeo algorithm
-def process_energy_controlled_two_state(results, numCycles, numAngles, redundancy):
+def process_energy_controlled_two_state(results, numCycles, numAngles, redundancy, printResults=False):
     success = '0' * numCycles
     ancillaSuccessStates = [success + " 0", success + " 1"]
 
@@ -419,22 +489,24 @@ def process_energy_controlled_two_state(results, numCycles, numAngles, redundanc
             for state in systemStates:
                 stateCountsAncilla0[state] = sum_dict(get_partial_key_matches(resultsAncilla0, ancillaSuccessStates[0] + ' ' + state))
                 stateCountsAncilla1[state] = sum_dict(get_partial_key_matches(resultsAncilla1, ancillaSuccessStates[1] + ' ' + state))
-            print("total")
-            print(sum_dict(get_partial_key_matches(results.get_counts(currentRunIndex), success)))
-            print("ancilla = 0")
-            print(ancilla0Total)
-            print(resultsAncilla0)
-            print(stateCountsAncilla0)
-            print("ancilla = 1")
-            print(ancilla1Total)
-            print(resultsAncilla1)
-            print(stateCountsAncilla1)
+            if printResults:
+                print("total")
+                print(sum_dict(get_partial_key_matches(results.get_counts(currentRunIndex), success)))
+                print("ancilla = 0")
+                print(ancilla0Total)
+                print(resultsAncilla0)
+                print(stateCountsAncilla0)
+                print("ancilla = 1")
+                print(ancilla1Total)
+                print(resultsAncilla1)
+                print(stateCountsAncilla1)
 
-            print("expectations: ")
-            expectations0.append(2 * stateCountsAncilla0["11"] / ancilla0Total - 2 * stateCountsAncilla0["00"] / ancilla0Total)
-            print(2 * stateCountsAncilla0["11"] / ancilla0Total - 2 * stateCountsAncilla0["00"] / ancilla0Total)
-            expectations1.append(2 * stateCountsAncilla1["11"] / ancilla1Total - 2 * stateCountsAncilla1["00"] / ancilla1Total)
-            print(2 * stateCountsAncilla1["11"] / ancilla1Total - 2 * stateCountsAncilla1["00"] / ancilla1Total)
+            expectations0.append(-2 * stateCountsAncilla0["11"] / ancilla0Total + 2 * stateCountsAncilla0["00"] / ancilla0Total)
+            expectations1.append(-2 * stateCountsAncilla1["11"] / ancilla1Total + 2 * stateCountsAncilla1["00"] / ancilla1Total)
+            if printResults:
+                print("expectations: ")
+                print(-2 * stateCountsAncilla0["11"] / ancilla0Total + 2 * stateCountsAncilla0["00"] / ancilla0Total)
+                print(-2 * stateCountsAncilla1["11"] / ancilla1Total + 2 * stateCountsAncilla1["00"] / ancilla1Total)
 
     averagedExpectations0 = np.mean(np.array(expectations0).reshape(-1, redundancy), axis=1)
     averagedExpectations1 = np.mean(np.array(expectations1).reshape(-1, redundancy), axis=1)
@@ -530,33 +602,186 @@ def run_two_state_rodeo(times, numCycles, E0, E1, xMod, zMod, twoStateTime, meas
     return rodeo
 
 
+def y_expectation(x, maa, mbb, amplitude, frequency, shift, overlap):
+    return (maa + mbb + (mbb - maa) * np.cos(x * frequency) + 2 * np.sqrt(overlap * (1 - overlap)) * amplitude * np.sin(x * frequency)) / (np.cos(shift) - np.cos(x * frequency) + 2 * overlap * np.cos(x * frequency))
+
+
+def sine_dataset(parameters, i, x):
+    """Calculate expectation function lineshape from parameters for data set."""
+    amplitude = parameters[f'amplitude_{i + 1}']
+    overlap = parameters[f'overlap_{i + 1}']
+    frequency = parameters[f'frequency_{i + 1}']
+    shift = parameters[f'shift_{i + 1}']
+    maa = parameters[f'maa_{i + 1}']
+    mbb = parameters[f'mbb_{i + 1}']
+    return y_expectation(x, maa, mbb, amplitude, frequency, shift, overlap)
+
+
+def objective(parameters, x, data):
+    """Calculate total residual for fits of the expectation functions to several data sets."""
+    ndata, _ = data.shape
+    residual = 0.0*data[:]
+
+    # make residual per data set
+    for i in range(ndata):
+        residual[i, :] = data[i, :] - sine_dataset(parameters, i, x)
+
+    # now flatten this to a 1D array, as minimize() needs
+    return residual.flatten()
+
+
+def simultaneous_controlled_two_state_fit(processedResults, maxAngle, numMeasures, isY=True, printResults=False):
+    angles = np.linspace(0, maxAngle, numMeasures)
+    data = np.array(processedResults)
+
+    fit_parameters = Parameters()
+
+    for index, y in enumerate(data):
+        fit_parameters.add(f'amplitude_{index + 1}', value=1)
+        fit_parameters.add(f'overlap_{index + 1}', value=0.5, min=0.001, max=1)
+        fit_parameters.add(f'frequency_{index + 1}', value=1, vary=False)
+        fit_parameters.add(f'maa_{index + 1}', value=0)
+        fit_parameters.add(f'mbb_{index + 1}', value=0)
+
+    fit_parameters[f'maa_{2}'].expr = 'maa_1'
+    fit_parameters[f'mbb_{2}'].expr = 'mbb_1'
+
+    fit_parameters[f'amplitude_{2}'].expr = 'amplitude_1'
+    fit_parameters[f'overlap_{2}'].expr = 'overlap_1'
+
+    fit_parameters.add(f'shift_{2}', value=np.pi, vary=False)
+    fit_parameters.add(f'shift_{1}', value=0, vary=False)
+
+    result = minimize(objective, fit_parameters, args=(angles, data), nan_policy='omit')
+
+    print(result.chisqr)
+
+    # grab the result and display it
+
+    if printResults:
+        report_fit(result.params)
+
+        for i in range(2):
+            y_fit = sine_dataset(result.params, i, angles)
+            plt.plot(angles, data[i, :], 'o', angles, y_fit, '-')
+
+        plt.show()
+
+    # return [[results[0].params, results[0].best_fit, results[0].best_values], [results[1].params, results[1].best_fit, results[1].best_values]]
+    return result
+
+
+def get_estimates(controlledFitResult, desiredParameters=None):
+    parameters = list()
+    if desiredParameters is not None:
+        desiredParameters = desiredParameters
+    else:
+        desiredParameters = ['amplitude_1', 'amplitude_2']
+
+    for param in desiredParameters:
+        parameters.append(controlledFitResult.params[param])
+
+    valueDeviations = list()
+    for param in parameters:
+        valueDeviations.append([param.value, param.stderr])
+
+    return valueDeviations
+
+
+def test_controlled_two_state_params(trials, cycles, redundancy, totalAngles, maxAngle=None, xMod=None, zMod=None):
+    if maxAngle is not None:
+        maxAngle = maxAngle
+    else:
+        maxAngle = 2 * np.pi
+
+    if xMod is not None:
+        xMod = xMod
+    else:
+        xMod = 2.5
+
+    if zMod is not None:
+        zMod = zMod
+    else:
+        zMod = 1.5
+
+    results = list()
+    processedResults = list()
+    fitResults = list()
+    elementEstimates = list()
+    elements = list()
+    elementErrors = list()
+    percentErrors = list()
+
+    for i in range(trials):
+        results.append(run_cont_two_state(cycles, redundancy, xMod, zMod, -1, 4, maxAngle, totalAngles, printJobID=False))
+
+    for i in range(trials):
+        processedResults.append(process_energy_controlled_two_state(results[i][0], cycles, totalAngles, redundancy))
+        fitResults.append(simultaneous_controlled_two_state_fit(processedResults[i], maxAngle, totalAngles))
+        elementEstimates.append(get_estimates(fitResults[i]))
+        elements.append([elementEstimates[i][0][0], elementEstimates[i][1][0]])
+        elementErrors.append([elementEstimates[i][0][1], elementEstimates[i][1][1]])
+        percentErrors.append([elementErrors[i][0] / elements[i][0], elementErrors[i][1] / elements[i][1]])
+
+    return [elementEstimates, np.transpose(elements), np.transpose(elementErrors), np.transpose(percentErrors)]
+
+
 def fit_controlled_two_state(processedResults, maxAngle, numMeasures, isY=True, printResults=False):
     angles = np.linspace(0, maxAngle, numMeasures)
 
-    model = ConstantModel()
-    model.set_param_hint('c', value=0, vary=True)
-    model += SineModel(prefix='selfDifference_')
-    model.set_param_hint('selfDifference_shift', value=np.pi/2, vary=False)
-    model.set_param_hint('selfDifference_frequency', value=1, vary=False)
-    model += SineModel(prefix='interactionElement_')
+    model0 = ConstantModel(prefix='aa_')
+    model0.set_param_hint('aa_c', value=0, vary=True)
+    model0 += ConstantModel(prefix='bb_')
+    model0.set_param_hint('bb_c', value=0, vary=True)
+    model0 += SineModel(prefix='selfDifference_')
+    model0.set_param_hint('selfDifference_frequency', value=1, vary=False)
+    model0 += SineModel(prefix='interactionElement_')
+    model0.set_param_hint('interactionElement_frequency', value=1, vary=False)
+
+    model1 = ConstantModel(prefix='aa_')
+    model1.set_param_hint('aa_c', value=0, vary=True)
+    model1 += ConstantModel(prefix='bb_')
+    model1.set_param_hint('bb_c', value=0, vary=True)
+    model1 += SineModel(prefix='selfDifference_')
+    model1.set_param_hint('selfDifference_frequency', value=1, vary=False)
+    model1 += SineModel(prefix='interactionElement_')
+    model1.set_param_hint('interactionElement_frequency', value=1, vary=False)
 
     if isY:
-        model.set_param_hint('interactionElement_shift', value=0, vary=True)
-    else:
-        model.set_param_hint('interactionElement_shift', value=np.pi/2, vary=True)
+        model0.set_param_hint('selfDifference_shift', value=3 * np.pi / 2, vary=False)
+        model0.set_param_hint('interactionElement_shift', value=np.pi, vary=True)
 
-    model.set_param_hint('interactionElement_frequency', value=1, vary=False)
+        model1.set_param_hint('selfDifference_shift', value=np.pi / 2, vary=False)
+        model1.set_param_hint('interactionElement_shift', value=0, vary=True)
+    else:
+        model1.set_param_hint('selfDifference_shift', value=3 * np.pi / 2, vary=False)
+        model1.set_param_hint('selfDifference_shift', value=np.pi / 2, vary=False)
+
+        model0.set_param_hint('interactionElement_shift', value=0, vary=True)
+        model1.set_param_hint('interactionElement_shift', value=np.pi, vary=True)
+
+    parameters0 = model0.make_params()
+    parameters0.add("selfDifference_amplitude", expr='bb_c-aa_c')
+
+    parameters1 = model1.make_params()
+    parameters1.add("selfDifference_amplitude", expr='bb_c-aa_c')
+
     # grab the result and display it
-    result = model.fit(processedResults[0], x=angles, method='nelder')
+    results = [model0.fit(processedResults[0], params=parameters0, x=angles, method='nelder'), model1.fit(processedResults[1], params=parameters1, x=angles, method='nelder')]
 
     if printResults:
-        print(result.fit_report())
+        print(results[0].fit_report())
+        print(results[1].fit_report())
+
         plt.plot(angles, processedResults[0], 'o', ms=6)
-        plt.plot(angles, result.best_fit, '-', label='best fit')
-        plt.plot(angles, result.init_fit, '--', label='fit with initial values')
+        plt.plot(angles, processedResults[1], 'x', ms=6)
+
+        plt.plot(angles, results[0].best_fit, '-', label='best fit 0')
+        plt.plot(angles, results[1].best_fit, '--', label='best fit 1')
         plt.show()
 
-    return [result.params, result.best_fit, result.best_values]
+    # return [[results[0].params, results[0].best_fit, results[0].best_values], [results[1].params, results[1].best_fit, results[1].best_values]]
+    return results
 
 
 # make a list with a circuit for each energy
@@ -795,7 +1020,7 @@ def find_single_peak(energies, counts, guess, noiseLevel, sigma, printResults=Fa
 
 
 # find peaks for a given set of parameters
-def identify_peaks(xMod, zMod, numCycles, scanNums, shotsPerEnergy, maxEigenvalue=None, scanWidths=None, jobIDs=None, repetitions=None, deviations=None, shots=None, backend=provider.get_backend('ibmq_belem')):
+def identify_peaks(xMod, zMod, numCycles, scanNums, shotsPerEnergy, maxEigenvalue=None, scanWidths=None, jobIDs=None, repetitions=None, deviations=None, shots=None, backend=provider.get_backend('ibmq_qasm_simulator')):
 
     # only scan a certain range instead of the entire possible space
     maxEigenvalue = estimate_eignenvalues(xMod, zMod) if maxEigenvalue is None else maxEigenvalue
@@ -824,14 +1049,14 @@ def identify_peaks(xMod, zMod, numCycles, scanNums, shotsPerEnergy, maxEigenvalu
     # IBMQ stuff start
     # create a job with all the circuits on the first pass if there isn't an id to retrieve from. Jobs with more than 300 circuits are split up
     if jobIDs is None or jobIDs[0] is None:
-        firstPassJob = jobManager.run(transpile(firstPassCircuits, backend=backend), backend=backend, name="first_pass", shots=shots)
+        firstPassJob = backend.run(transpile(firstPassCircuits, backend=backend), backend=backend, name="first_pass", shots=shots)
     else:
-        firstPassJob = jobManager.retrieve_job_set(jobIDs[0], provider)
-    firstPassJobID = firstPassJob.job_set_id()
+        firstPassJob = provider.retrieve_job(job_id=jobIDs[0])
+    firstPassJobID = firstPassJob.job_id()
     # print the id for later retrieval
     print("first run job id: " + firstPassJobID)
     # clean up the results into a more usable format
-    firstRunCounts = clean_results(firstPassJob.results(), scanNums[0] * repetitions, numCycles, shotsPerEnergy[0])
+    firstRunCounts = clean_results(firstPassJob.result(), scanNums[0] * repetitions, numCycles, shotsPerEnergy[0])
     firstRunCounts = unflatten(firstRunCounts, repetitions)
     print(firstRunCounts)
     # IBMQ stuff end. Final result is a list with total successes from each energy scan (averaged if there are multiple circuits per energy)
@@ -856,14 +1081,14 @@ def identify_peaks(xMod, zMod, numCycles, scanNums, shotsPerEnergy, maxEigenvalu
     # IBMQ stuff start
     # again, create and run a job with all the circuits  if there isn't an id to retrieve from
     if jobIDs is None or jobIDs[1] is None:
-        secondPassJob = jobManager.run(transpile(secondPassCircuits, backend=backend), backend=backend, name="second_pass", shots=shots)
+        secondPassJob = backend.run(transpile(secondPassCircuits, backend=backend), backend=backend, name="second_pass", shots=shots)
     else:
-        secondPassJob = jobManager.retrieve_job_set(jobIDs[1], provider)
+        secondPassJob = provider.retrieve_job(job_id=jobIDs[1])
     # print the id to access the data later
-    secondPassJobID = secondPassJob.job_set_id()
+    secondPassJobID = secondPassJob.job_id()
     print("second run job id: " + secondPassJobID)
     # take the data for the second scan and put in a usable format
-    secondRunCounts = clean_results(secondPassJob.results(), len(secondPassEnergies), numCycles, shotsPerEnergy[1])
+    secondRunCounts = clean_results(secondPassJob.result(), len(secondPassEnergies), numCycles, shotsPerEnergy[1])
     secondRunCounts = unflatten(secondRunCounts, repetitions)
     secondPassEnergies = unflatten(secondPassEnergies, repetitions)
     print(secondPassEnergies)
@@ -906,13 +1131,13 @@ def identify_peaks(xMod, zMod, numCycles, scanNums, shotsPerEnergy, maxEigenvalu
     # IBMQ stuff start
     # make and run a job for the third scan if there isn't an id to retrieve from
     if jobIDs is None or jobIDs[2] is None:
-        thirdPassJob = jobManager.run(transpile(thirdPassCircuits, backend=backend), backend=backend, name="third_pass", shots=shots)
+        thirdPassJob = backend.run(transpile(thirdPassCircuits, backend=backend), backend=backend, name="third_pass", shots=shots)
     else:
-        thirdPassJob = jobManager.retrieve_job_set(jobIDs[2], provider)
+        thirdPassJob = provider.retrieve_job(job_id=jobIDs[2])
     # print the id and get usable results
-    thirdPassJobID = thirdPassJob.job_set_id()
+    thirdPassJobID = thirdPassJob.job_id()
     print("third run job id: " + thirdPassJobID)
-    thirdRunCounts = clean_results(thirdPassJob.results(), len(thirdPassEnergies), numCycles, shotsPerEnergy[2])
+    thirdRunCounts = clean_results(thirdPassJob.result(), len(thirdPassEnergies), numCycles, shotsPerEnergy[2])
     thirdRunCounts = unflatten(thirdRunCounts, repetitions)
     thirdPassEnergies = unflatten(thirdPassEnergies, repetitions)
     # IBMQ stuff end; result is the same list of successes as usual
@@ -960,7 +1185,7 @@ def plot_scans(data):
 
 
 # method to test for the overlap after n cycles
-def get_simple_overlap(numCycles, eigenvalues, xMod, zMod, numTries, twoStateEnergies=None, backend=provider.get_backend('ibmq_belem')):
+def get_simple_overlap(numCycles, eigenvalues, xMod, zMod, numTries, twoStateEnergies=None, backend=provider.get_backend('ibmq_qasm_simulator')):
 
     circs = list()
     counts = list()
@@ -983,10 +1208,10 @@ def get_simple_overlap(numCycles, eigenvalues, xMod, zMod, numTries, twoStateEne
 
     for energyCircs, eigenvalue in zip(circs, eigenvalues):
         # run the set of circuits for each energy
-        overlapJob = jobManager.run(transpile(energyCircs, backend=backend), backend=backend, name="overlapJob", shots=1024)
-        print(str(eigenvalue) + " overlapJob job id: " + overlapJob.job_set_id())
+        overlapJob = backend.run(transpile(energyCircs, backend=backend), backend=backend, name="overlapJob", shots=1024)
+        print(str(eigenvalue) + " overlapJob job id: " + overlapJob.job_id())
         # get the average of each of the tries and add it to a list
-        average = clean_results(overlapJob.results(), 1, numCycles, numTries)[0]
+        average = clean_results(overlapJob.result(), 1, numCycles, numTries)[0]
         counts.append(average)
         print(average)
 
@@ -1067,7 +1292,7 @@ def process_two_state_dual(results, numCycles, numTimes, redundancy):
     return [averageExpectations, totalExpectations]
 
 
-def run_two_state(cycles, redundancy, secondTimes, xMod, zMod, lowTarget, highTarget, measurements, backend=provider.get_backend('ibmq_belem'), jobID=None):
+def run_two_state(cycles, redundancy, secondTimes, xMod, zMod, lowTarget, highTarget, measurements, backend=provider.get_backend('ibmq_qasm_simulator'), jobID=None):
     circs = list()
 
     # allows for retrieval of jobs
@@ -1086,15 +1311,15 @@ def run_two_state(cycles, redundancy, secondTimes, xMod, zMod, lowTarget, highTa
 
         # run the circuits
         circs = transpile(circs, backend=backend)
-        job = jobManager.run(circs, backend=backend, name="two_state", shots=1024)
+        job = backend.run(circs, backend=backend, name="two_state", shots=1024)
     else:
-        job = jobManager.retrieve_job_set(jobID, provider)
-    print("two state job" + job.job_set_id())
+        job = provider.retrieve_job(job_id=jobID)
+    print("two state job" + job.job_id())
 
-    return process_two_state_dual(job.results(), cycles, len(secondTimes), redundancy)
+    return process_two_state_dual(job.result(), cycles, len(secondTimes), redundancy)
 
 
-def run_controlled_two_state(cycles, redundancy, twoStateTimes, xMod, zMod, E0, E1, measurements, backend=provider.get_backend('ibmq_belem'), jobID=None):
+def run_controlled_two_state(cycles, redundancy, twoStateTimes, xMod, zMod, E0, E1, measurements, backend=provider.get_backend('ibmq_qasm_simulator'), jobID=None):
     circs = list()
 
     if jobID is None:
@@ -1103,9 +1328,9 @@ def run_controlled_two_state(cycles, redundancy, twoStateTimes, xMod, zMod, E0, 
             for time in twoStateTimes:
                 circs.append(run_two_state_rodeo(times, cycles, E0, E1, xMod, zMod, time, measurements))
         circs = transpile(circs, backend=backend)
-        job = jobManager.run(circs, backend=backend, name="two_state", shots=1024)
+        job = backend.run(circs, backend=backend, name="two_state", shots=1024)
     else:
-        job = jobManager.retrieve_job_set(jobID, provider)
-    print("two state job " + job.job_set_id())
+        job = provider.retrieve_job(job_id=jobID)
+    print("two state job " + job.job_id())
 
-    return process_two_state_dual(job.results(), cycles, len(twoStateTimes), redundancy)
+    return process_two_state_dual(job.result(), cycles, len(twoStateTimes), redundancy)

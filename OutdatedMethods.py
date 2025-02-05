@@ -2,7 +2,7 @@ from RodeoMethods import *
 
 
 # OUTDATED - see identify_peaks and submethods for a better implementation
-def search_spectrum(linspace, threshold, numCycles, laterScanNum, numSecond, xMod, zMod, backend = provider.get_backend('ibmq_belem')):
+def search_spectrum(linspace, threshold, numCycles, laterScanNum, numSecond, xMod, zMod, backend = provider.get_backend('ibmq_qasm_simulator')):
     delta = abs(linspace[1]) - abs(linspace[0])
     length = linspace[0] - linspace[-1]
 
